@@ -14,3 +14,4 @@ wandb/
 Thumbs.db
 *.pem
 *.key
+ml/data/faceforensics_faces.zip

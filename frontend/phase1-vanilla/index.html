@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DeepGuard - Phase 1 Call Test</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; text-align: center; }
+    video { width: 40%; margin: 10px; border: 2px solid #444; border-radius: 8px; background: #000; }
+    input, button { padding: 8px; margin: 5px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h2>DeepGuard — Phase 1: Basic WebRTC Call</h2>
+
+  <input id="roomInput" placeholder="Enter room ID" />
+  <button id="joinBtn">Join Room</button>
+
+  <div>
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+  </div>
+
+  <script src="socket.io.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
