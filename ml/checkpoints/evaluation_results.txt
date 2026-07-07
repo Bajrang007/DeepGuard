@@ -1,0 +1,35 @@
+DeepGuard - Phase 2 Video Deepfake Detection Model
+Evaluation Results
+
+Model: EfficientNet-B0 + GRU
+Dataset: FaceForensics++ (c23), all 5 manipulation types
+Training: 6 epochs, batch-size 16, AMP, class-weighted loss (Adam optimizer, lr=0.0005)
+Train/Val split: video-level (no data leakage), 80/20
+
+=== Training Progress ===
+Epoch 1: Train AUC 0.8856 | Val AUC 0.9183
+Epoch 2: Train AUC 0.9558 | Val AUC 0.7953 (temporary instability)
+Epoch 3: Train AUC 0.9683 | Val AUC 0.9262
+Epoch 4: Train AUC 0.9724 | Val AUC 0.9353
+Epoch 5: Train AUC 0.9759 | Val AUC 0.9182 (mild dip)
+Epoch 6: Train AUC 0.9785 | Val AUC 0.9515 (best - final model)
+
+=== Final Overall Metrics ===
+Best Validation AUC: 0.9515
+Best Validation Accuracy: 97.39%
+
+=== Per-Category Results (Validation Set, 6547 total sequences) ===
+fake_deepfakes       | N=1255 | Detection Rate=0.9873
+fake_face2face       | N=1192 | Detection Rate=0.9866
+fake_faceshifter     | N=1116 | Detection Rate=0.9866
+fake_faceswap        | N= 877 | Detection Rate=0.9966
+fake_neuraltextures  | N= 903 | Detection Rate=0.9779
+real                 | N=1204 | Accuracy=0.9161
+
+=== Key Findings ===
+- Model achieves 97.8%-99.7% detection rate across all 5 fake manipulation types
+- Real video accuracy: 91.61% (false positive rate ~8.4%)
+- Consistent performance across manipulation types indicates good generalization,
+  not overfitting to a single fake-generation method
+- Weakest point: occasional false positives on real videos - candidate for
+  improvement via multi-signal fusion (video + audio + lip-sync) in later phases
