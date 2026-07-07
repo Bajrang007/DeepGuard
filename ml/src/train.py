@@ -1,32 +1,27 @@
 """
-Training script for DeepGuard video deepfake detection model.
-Designed to run on Colab with GPU + persistent checkpointing to Google Drive.
-
-Usage (in Colab):
-1. Mount Drive: from google.colab import drive; drive.mount('/content/drive')
-2. Clone repo or upload ml/ folder
-3. Run: python train.py --data-dir /path/to/extracted/faces --checkpoint-dir /content/drive/MyDrive/deepguard_checkpoints
+Efficient training script: mixed precision (AMP), video-level train/val
+split, class-weighted loss, per-epoch checkpointing to Drive.
 """
 
 import os
 import sys
 import argparse
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, accuracy_score
-import numpy as np
 
 sys.path.append(os.path.dirname(__file__))
-from dataset import DeepfakeSequenceDataset
+from dataset import DeepfakeSequenceDataset, get_all_video_keys
 from model import DeepfakeVideoModel
 
 
 def get_label_map():
-    """All 6 categories, with all non-real as fake (label=1)"""
     return {
         "real": 0,
         "fake_deepfakes": 1,
@@ -37,142 +32,134 @@ def get_label_map():
     }
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device):
+def split_videos(data_dir, label_map, val_fraction=0.2, seed=42):
+    all_videos = get_all_video_keys(data_dir, label_map)
+    rng = random.Random(seed)
+    rng.shuffle(all_videos)
+    val_size = int(len(all_videos) * val_fraction)
+    return set(all_videos[val_size:]), set(all_videos[:val_size])
+
+
+def compute_class_weights(dataset, num_classes=2):
+    counts = [0] * num_classes
+    for sample in dataset.samples:
+        counts[sample[1]] += 1
+    total = sum(counts)
+    return torch.tensor([total / c if c > 0 else 0.0 for c in counts], dtype=torch.float32)
+
+
+def train_epoch(model, loader, criterion, optimizer, device, scaler):
     model.train()
-    total_loss = 0.0
-    all_preds = []
-    all_labels = []
+    total_loss, all_preds, all_labels = 0.0, [], []
 
-    for frames, labels in tqdm(train_loader, desc="Training"):
+    for frames, labels in tqdm(loader, desc="Training"):
         frames, labels = frames.to(device), labels.to(device)
-
         optimizer.zero_grad()
-        outputs = model(frames)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
 
-        total_loss += loss.item()
-        preds = torch.argmax(outputs, dim=1).cpu().numpy()
-        all_preds.extend(preds)
-        all_labels.extend(labels.cpu().numpy())
-
-    avg_loss = total_loss / len(train_loader)
-    accuracy = accuracy_score(all_labels, all_preds)
-    auc = roc_auc_score(all_labels, all_preds)
-
-    return avg_loss, accuracy, auc
-
-
-def eval_epoch(model, val_loader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    all_preds = []
-    all_labels = []
-
-    with torch.no_grad():
-        for frames, labels in tqdm(val_loader, desc="Validation"):
-            frames, labels = frames.to(device), labels.to(device)
-
+        with autocast(device_type="cuda"):
             outputs = model(frames)
             loss = criterion(outputs, labels)
 
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item()
+        all_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+    return (total_loss / len(loader),
+            accuracy_score(all_labels, all_preds),
+            roc_auc_score(all_labels, all_preds))
+
+
+def eval_epoch(model, loader, criterion, device):
+    model.eval()
+    total_loss, all_preds, all_labels = 0.0, [], []
+
+    with torch.no_grad():
+        for frames, labels in tqdm(loader, desc="Validation"):
+            frames, labels = frames.to(device), labels.to(device)
+            with autocast(device_type="cuda"):
+                outputs = model(frames)
+                loss = criterion(outputs, labels)
+
             total_loss += loss.item()
-            preds = torch.argmax(outputs, dim=1).cpu().numpy()
-            all_preds.extend(preds)
+            all_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    avg_loss = total_loss / len(val_loader)
-    accuracy = accuracy_score(all_labels, all_preds)
-    auc = roc_auc_score(all_labels, all_preds)
-
-    return avg_loss, accuracy, auc
+    return (total_loss / len(loader),
+            accuracy_score(all_labels, all_preds),
+            roc_auc_score(all_labels, all_preds))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", required=True, help="Path to extracted faces directory")
-    parser.add_argument("--checkpoint-dir", default="ml/checkpoints", help="Where to save checkpoints")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-    parser.add_argument("--resume-from", default=None, help="Resume from checkpoint (path)")
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--checkpoint-dir", default="ml/checkpoints")
+    parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=0.0005)
+    parser.add_argument("--resume-from", default=None)
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-
-    # Initialize W&B
-    wandb.init(project="deepguard", name="phase2-video-training", job_type="train")
+    wandb.init(project="deepguard", name="phase2-video-training-v2", job_type="train")
     wandb.config.update(args)
 
-    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Dataset and DataLoader
-    print("Loading dataset...")
-    dataset = DeepfakeSequenceDataset(args.data_dir, get_label_map(), sequence_length=16)
-    print(f"Total sequences: {len(dataset)}")
+    label_map = get_label_map()
+    train_videos, val_videos = split_videos(args.data_dir, label_map)
+    print(f"Train videos: {len(train_videos)}, Val videos: {len(val_videos)}")
 
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
+    train_dataset = DeepfakeSequenceDataset(args.data_dir, label_map, 16, allowed_videos=train_videos)
+    val_dataset = DeepfakeSequenceDataset(args.data_dir, label_map, 16, allowed_videos=val_videos)
+    print(f"Train sequences: {len(train_dataset)}, Val sequences: {len(val_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # Model
     model = DeepfakeVideoModel().to(device)
-    criterion = nn.CrossEntropyLoss()
+    class_weights = compute_class_weights(train_dataset).to(device)
+    print(f"Class weights (real, fake): {class_weights.tolist()}")
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    scaler = GradScaler()
 
-    start_epoch = 0
-    best_val_auc = 0.0
+    start_epoch, best_val_auc = 0, 0.0
 
-    # Resume from checkpoint if provided
     if args.resume_from and os.path.exists(args.resume_from):
         print(f"Resuming from {args.resume_from}")
-        checkpoint = torch.load(args.resume_from, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
-        best_val_auc = checkpoint.get("best_val_auc", 0.0)
+        ckpt = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val_auc = ckpt.get("best_val_auc", 0.0)
 
-    # Training loop
     for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
-
-        train_loss, train_acc, train_auc = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc, train_auc = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
         val_loss, val_acc, val_auc = eval_epoch(model, val_loader, criterion, device)
 
         print(f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, AUC: {train_auc:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, AUC: {val_auc:.4f}")
 
         wandb.log({
-            "train_loss": train_loss,
-            "train_accuracy": train_acc,
-            "train_auc": train_auc,
-            "val_loss": val_loss,
-            "val_accuracy": val_acc,
-            "val_auc": val_auc,
+            "train_loss": train_loss, "train_accuracy": train_acc, "train_auc": train_auc,
+            "val_loss": val_loss, "val_accuracy": val_acc, "val_auc": val_auc,
         })
 
-        # Save checkpoint every epoch
-        checkpoint_path = os.path.join(args.checkpoint_dir, f"epoch_{epoch}.pth")
+        ckpt_path = os.path.join(args.checkpoint_dir, f"epoch_{epoch}.pth")
         torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "best_val_auc": best_val_auc,
-        }, checkpoint_path)
+            "epoch": epoch, "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(), "best_val_auc": best_val_auc,
+        }, ckpt_path)
 
-        # Save best model
         if val_auc > best_val_auc:
             best_val_auc = val_auc
-            best_model_path = os.path.join(args.checkpoint_dir, "best_model.pth")
-            torch.save(model.state_dict(), best_model_path)
+            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, "best_model.pth"))
             print(f"Saved best model (AUC: {best_val_auc:.4f})")
 
     wandb.finish()
