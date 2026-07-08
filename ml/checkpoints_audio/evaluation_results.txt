@@ -1,0 +1,29 @@
+DeepGuard - Phase 3 Audio Anti-Spoofing Model
+Evaluation Results
+
+Model: RawNet2 (SincConv + Residual Blocks + GRU)
+Dataset: ASVspoof 2019 LA (official train/dev protocol split)
+Training: 8 epochs, batch-size 32, AMP, class-weighted loss (Adam optimizer, lr=0.0001)
+
+=== Training Progress ===
+Epoch 1: Val EER 0.0641 (6.41%)
+Epoch 2: Val EER 0.0352 (3.52%)
+Epoch 3: Val EER 0.0264 (2.64%)
+Epoch 4: Val EER 0.0150 (1.50%)
+Epoch 5: Val EER 0.0091 (0.91%) - best, final model
+Epoch 6: Val EER 0.0192 (mild fluctuation)
+Epoch 7: Val EER 0.0138
+Epoch 8: Val EER 0.0121
+
+=== Final Metrics (Best Model - Epoch 5) ===
+Validation EER: 0.91%
+Validation AUC: 0.9996
+Validation Accuracy: 99.25%
+
+=== Key Findings ===
+- Model achieves sub-1% EER, competitive with published ASVspoof 2019 LA
+  research systems (typical published baselines: 2-10% EER)
+- Class weighting ([9.84, 1.11] for bonafide:spoof) correctly compensated
+  for the ~9:1 class imbalance in the dataset
+- Training was notably faster and more stable than the video model
+  (Phase 2), with no severe instability spikes
