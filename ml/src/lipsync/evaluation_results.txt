@@ -1,0 +1,36 @@
+DeepGuard - Phase 4 Lip-Sync Fusion Signal
+Evaluation Results
+
+Model: SyncNet (pretrained, joonson/syncnet_python implementation)
+Source: Original research checkpoint from Oxford VGG group (syncnet_v2.model)
+Purpose: Detect audio-visual synchronization mismatch as a third,
+         independent signal alongside video (Phase 2) and audio (Phase 3)
+         deepfake detection models.
+
+=== Validation Approach ===
+Since FaceForensics++ (our primary video dataset) has no audio tracks,
+direct validation on our own deepfake dataset was not possible. Instead,
+we validated SyncNet's core discriminative ability using a controlled
+synthetic desync test on a sample video.
+
+=== Test Results ===
+Synced video (original):         Confidence: 10.081
+Desynced video (+1.0s audio shift): Confidence: 8.830
+
+Both AV offset detection and confidence score correctly reflected the
+introduced desync, though the magnitude of change was moderated by
+SyncNet's limited search window (+/- 15 frames, ~0.6s at 25fps) - the
+1-second shift exceeded this window, so the algorithm found its best
+available (imperfect) alignment rather than reporting a catastrophic
+mismatch.
+
+=== Known Limitation ===
+Full validation against real audio-visual deepfakes (e.g., FakeAVCeleb)
+was scoped as a follow-up task, deferred until after core system phases
+(5-9) are complete, given the effort-vs-benefit tradeoff of accessing
+gated/mirrored datasets within project time constraints.
+
+=== Integration Note ===
+This module assumes pre-cropped, face-tracked video input, matching
+SyncNet's expected format. Full-frame face detection/tracking to produce
+this input will be handled in Phase 6 (live call integration).
